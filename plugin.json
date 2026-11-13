@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "id": "local.upstream-sites",
+  "version": "1.1.1",
+  "apiVersion": 1,
+  "minHostVersion": "0.7.1",
+  "name": {
+    "en": "Upstream sites",
+    "zh": "上游站点"
+  },
+  "description": {
+    "en": "Upstream wallets, bindings and probes with ownership-safe provider control. Controls default to off.",
+    "zh": "上游余额、绑定与探针监控，支持保留人工选择的自动启停，默认关闭。"
+  },
+  "publisher": {
+    "name": "Local administration"
+  },
+  "license": "LGPL-3.0-or-later",
+  "permissions": [
+    "notify.email"
+  ],
+  "backend": {
+    "executable": "backend/plugin",
+    "routes": [
+      {
+        "method": "*",
+        "path": "/*",
+        "auth": "admin",
+        "timeoutSeconds": 60,
+        "maxBodyBytes": 1048576
+      }
+    ],
+    "tasks": [
+      {
+        "name": "monitor",
+        "schedule": "@every 1m",
+        "timeoutSeconds": 300
+      }
+    ]
+  },
+  "frontend": {
+    "entry": "frontend/index.js",
+    "styles": [
+      "frontend/index.css"
+    ],
+    "pages": [
+      {
+        "id": "sites",
+        "path": "",
+        "audience": "admin",
+        "title": {
+          "en": "Upstream sites",
+          "zh": "上游站点"
+        }
+      }
+    ],
+    "menus": [
+      {
+        "page": "sites",
+        "label": {
+          "en": "Upstream sites",
+          "zh": "上游站点"
+        },
+        "order": 45
+      }
+    ]
+  },
+  "config": {
+    "fields": [
+      {
+        "key": "hostURL",
+        "type": "string",
+        "required": true,
+        "default": "http://127.0.0.1:8080",
+        "label": {
+          "en": "Host API URL",
+          "zh": "本机管理 API 地址"
+        }
+      },
+      {
+        "key": "adminKey",
+        "type": "secret",
+        "required": true,
+        "label": {
+          "en": "Management API key",
+          "zh": "管理 API 密钥"
+        }
+      },
+      {
+        "key": "encryptionKey",
+        "type": "secret",
+        "required": true,
+        "label": {
+          "en": "Encryption key",
+          "zh": "数据加密密钥"
+        },
+        "maxLength": 64
+      },
+      {
+        "key": "controlDSN",
+        "type": "secret",
+        "required": false,
+        "maxLength": 2048,
+        "label": {"en": "Control connection", "zh": "原子控制连接"},
+        "description": {"en": "Execute-only PostgreSQL login for the installed control bridge. Required for automatic provider control.", "zh": "专用受限 PostgreSQL 连接，只能执行控制桥函数；开启自动启停前需配置。"}
+      },
+      {
+        "key": "notifyUserID",
+        "type": "integer",
+        "default": 0,
+        "min": 0,
+        "label": {
+          "en": "Alert user ID",
+          "zh": "告警接收用户 ID"
+        }
+      }
+    ]
+  }
+}
