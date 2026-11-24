@@ -70,7 +70,7 @@
 
 完整备份应包含 PostgreSQL 全库、数据库角色、应用数据目录及固定加密密钥。只导出插件 KV 不足以恢复控制桥触发器、函数、专用角色和正在生效的人工保护记录。
 
-站点原始记录默认保留 90 天，每日汇总和事件默认保留 365 天。新版按统计日计算余额汇总的到期日。升级时保留旧版原单位数据，缺少历史价格快照的区间显示未计价。回退前备份插件 KV 和站点配置。宿主 KV 有总容量限制，高频探针和大量站点部署可在宿主查看用量。
+站点原始记录默认保留 90 天，每日汇总和事件默认保留 365 天。新版按统计日计算余额汇总的到期日。升级时保留旧版原单位数据，缺少历史价格快照的区间显示未计价。回退前备份插件 KV 和站点配置。如果回退期间用 1.1.1 查询或编辑过站点，再次升级后核对该站点倍率。宿主 KV 有总容量限制，高频探针和大量站点部署可在宿主查看用量。
 
 ## 构建与验证
 
@@ -79,6 +79,7 @@
 ```sh
 go test -mod=vendor ./...
 go vet -mod=vendor ./...
+node --test tests/frontend.test.cjs
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=vendor -buildvcs=false -trimpath -ldflags='-s -w' -o backend/plugin .
 tar -czf upstream-sites-plugin.tar.gz plugin.json backend/plugin frontend LICENSE COPYING THIRD_PARTY_NOTICES.md control_bridge.sql
 ```
