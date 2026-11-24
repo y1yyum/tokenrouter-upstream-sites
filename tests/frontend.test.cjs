@@ -196,3 +196,25 @@ test('记录范围按站点日历切换，混合旧日汇总保留部分计价',
   assert.match(visibleText(render()), /余额下降估算 5/)
   assert.equal(calls.length, requestCount)
 })
+
+test('总览与日报显示无法计数的旧区间，并保留已知的 1 / 1', async () => {
+  const dates = { timezone: 'Asia/Shanghai', from: '2026-11-25', to: '2026-11-25' }
+  const cost = { estimated_cost_cny: '5', pricing_status: 'partial' }
+  const unit = { ...cost, unit: 'USD', priced_intervals: 1, comparable_intervals: 1, upstream_cost: '10' }
+  const period = { ...dates, ...cost, has_unknown_coverage: true, by_unit: [{ ...unit, has_unknown_coverage: true }] }
+  const day = { ...unit, algorithm_version: 1, timezone: dates.timezone, date: dates.from,
+    wallet_epoch: 2, statistics_epoch: 3, estimated_spend: '40', net_change: '10' }
+  const { render } = await mount({ days: [day], report: reportFixture({
+    sites: [{ site_id: 1, status: 'fresh', balances: [usd], period }], periods: [period],
+  }) })
+  const assertCoverage = table => {
+    const text = visibleText(table)
+    assert.match(text, /部分计价 · 已计价小计/)
+    assert.match(text, /已计价 1 \/ 1 段/)
+    assert.match(text, /旧日汇总缺少计价证据，区间数未知/)
+  }
+  assertCoverage(find(render(), 'table', '观察到的下降'))
+  await find(render(), 'button', '记录').props.onClick()
+  assertCoverage(find(render(), 'table', '观察到的下降'))
+  assertCoverage(find(render(), 'table', '统计质量'))
+})

@@ -247,6 +247,17 @@ func TestOverviewPreservesUnknownLegacyCoverage(t *testing.T) {
 		o.addSite(first, []DailyStat{legacy, priced})
 		assertCoverage(t, o.result().Periods[0], pricingPriced, false, 1, new("7"))
 	})
+	t.Run("explicit partial with equal counts", func(t *testing.T) {
+		merged := priced
+		merged.AlgorithmVersion = 1
+		merged.EstimatedSpend = new("40")
+		merged.PricingStatus = pricingPartial
+		o := newOverviewTotals(now, q)
+		o.addSite(first, []DailyStat{merged})
+		out := o.result()
+		assertCoverage(t, *out.Sites[0].Period, pricingPartial, true, 1, new("7"))
+		assertCoverage(t, out.Periods[0], pricingPartial, true, 1, new("7"))
+	})
 	t.Run("across sites and midnight", func(t *testing.T) {
 		start := time.Date(2026, 11, 23, 23, 50, 0, 0, time.UTC)
 		price := WalletPrice{Multiplier: "2", Source: walletPriceConfigured}

@@ -298,6 +298,59 @@ func TestBalanceCostAcceptancePreservesPartialLegacyDay(t *testing.T) {
 	}
 }
 
+func TestBalanceCostAcceptanceKeepsUncountedLegacyCoverageOnSameDay(t *testing.T) {
+	p, h := testPlugin(t)
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"isValid":true,"balance":"%d","unit":"USD"}`, 130-10*requests.Add(1))
+	}))
+	t.Cleanup(upstream.Close)
+	zone := acceptanceTimezone()
+	site := acceptanceSite(t, p, upstream.URL, "sub2api", zone, BalanceMultipliers{"USD": "2"})
+	loc, err := time.LoadLocation(zone)
+	require.NoError(t, err)
+	date := time.Now().In(loc).Format(time.DateOnly)
+	legacy := DailyStat{
+		AlgorithmVersion: 1, Date: date, Timezone: zone, Unit: "USD",
+		WalletEpoch: site.WalletEpoch, StatisticsEpoch: site.StatisticsEpoch,
+		EstimatedSpend: new("30"), NetChange: new("20"), CoveredSeconds: 10800,
+	}
+	_, err = h.Env.Host.KV.Put(t.Context(), "daily", fmtSource(site.ID, date), []DailyStat{legacy})
+	require.NoError(t, err)
+	p = &Plugin{}
+	require.NoError(t, p.Init(t.Context(), h.Env))
+	p.client = upstream.Client()
+	acceptanceQuery(t, p, site.ID)
+	acceptanceQuery(t, p, site.ID)
+	row := acceptanceDay(t, acceptanceDaily(t, p, site.ID), date, "USD", site.WalletEpoch, site.StatisticsEpoch)
+	require.Equal(t, new("40"), row.EstimatedSpend)
+	require.Equal(t, new("5"), row.EstimatedCostCNY)
+	require.Equal(t, pricingPartial, row.PricingStatus)
+	require.True(t, row.HasUnknownCoverage)
+	require.Equal(t, 1, row.PricedIntervals)
+	require.Equal(t, 1, row.ComparableIntervals)
+
+	overview := readPricingResponse[overviewResponse](t, call(t, p, http.MethodGet, "/statistics/overview", nil))
+	require.Len(t, overview.Sites, 1)
+	require.NotNil(t, overview.Sites[0].Period)
+	require.Len(t, overview.Periods, 1)
+	for _, period := range []overviewPeriod{*overview.Sites[0].Period, overview.Periods[0]} {
+		require.Equal(t, row.PricingStatus, period.PricingStatus)
+		require.Equal(t, row.EstimatedCostCNY, period.EstimatedCostCNY)
+		require.True(t, period.HasUnknownCoverage)
+		require.Len(t, period.ByUnit, 1)
+		unit := period.ByUnit[0]
+		require.Equal(t, row.Unit, unit.Unit)
+		require.Equal(t, row.PricingStatus, unit.PricingStatus)
+		require.Equal(t, row.EstimatedCostCNY, unit.EstimatedCostCNY)
+		require.Equal(t, row.PricedIntervals, unit.PricedIntervals)
+		require.Equal(t, row.ComparableIntervals, unit.ComparableIntervals)
+		require.Equal(t, row.UnpricedDrop, unit.UnpricedDrop)
+		require.True(t, unit.HasUnknownCoverage)
+	}
+	require.EqualValues(t, 2, requests.Load())
+}
+
 func TestBalanceCostAcceptanceRetainsCrossDayPrecisionWithoutRawHistory(t *testing.T) {
 	p, h := testPlugin(t)
 	site := acceptanceSite(t, p, "https://example.com", "sub2api", "UTC", BalanceMultipliers{"USD": "2", "TOKENS": "1"})

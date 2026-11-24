@@ -347,10 +347,7 @@ func (p *overviewPeriodTotals) add(day DailyStat) {
 	addOverviewAmount(&unit.UnpricedDrop, day.UnpricedDrop)
 	unit.PricedIntervals += day.PricedIntervals
 	unit.ComparableIntervals += day.ComparableIntervals
-	// v1 日桶记录了可比区间的金额，但没有记录区间数。首样本日没有这些金额。
-	unit.HasUnknownCoverage = unit.HasUnknownCoverage ||
-		(day.AlgorithmVersion == 1 && day.ComparableIntervals == 0 && day.EstimatedCostCNY == nil &&
-			(day.EstimatedSpend != nil || day.NetChange != nil))
+	unit.HasUnknownCoverage = unit.HasUnknownCoverage || overviewDayHasUnknownCoverage(day)
 	unit.CoveredSeconds += day.CoveredSeconds
 	unit.Gap = unit.Gap || day.Gap
 	if len(day.UnpricedReasons) != 0 {
@@ -361,6 +358,16 @@ func (p *overviewPeriodTotals) add(day DailyStat) {
 			unit.UnpricedReasons[reason] += count
 		}
 	}
+}
+
+func overviewDayHasUnknownCoverage(day DailyStat) bool {
+	if day.HasUnknownCoverage || (day.PricingStatus == pricingPartial &&
+		(day.AlgorithmVersion == 1 || day.PricedIntervals == day.ComparableIntervals)) {
+		return true
+	}
+	// 旧日桶有金额时代表存在可比观测，只有首样本的日桶没有这些字段。
+	return day.AlgorithmVersion == 1 && day.ComparableIntervals == 0 && day.EstimatedCostCNY == nil &&
+		(day.EstimatedSpend != nil || day.NetChange != nil)
 }
 
 func (p *overviewPeriodTotals) result() overviewPeriod {

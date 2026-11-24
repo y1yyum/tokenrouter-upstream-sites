@@ -119,18 +119,19 @@
         total.unpriced_reasons[reason] = (total.unpriced_reasons[reason] ?? 0) + count
       }
       total.gap ||= row.gap
-      total.hasLegacyCoverage ||= legacyCoverage(row)
+      total.has_unknown_coverage ||= hasUnknownCoverage(row)
       total.hasPartialDay ||= row.pricing_status === 'partial'
       total.pricing_status = total.priced_intervals === 0 ? 'unknown'
-        : total.hasPartialDay || total.hasLegacyCoverage || total.priced_intervals < total.comparable_intervals ? 'partial' : 'priced'
+        : total.hasPartialDay || total.has_unknown_coverage || total.priced_intervals < total.comparable_intervals ? 'partial' : 'priced'
       byUnit.set(row.unit, total)
     }
     return [...byUnit.values()]
   }
 
-  function legacyCoverage(row) {
-    return row.algorithm_version === 1 && row.estimated_cost_cny == null && !row.comparable_intervals &&
-      (row.estimated_spend != null || row.net_change != null)
+  function hasUnknownCoverage(row) {
+    if (row.has_unknown_coverage === true) return true
+    return row.algorithm_version === 1 && (row.pricing_status === 'partial' ||
+      (row.estimated_cost_cny == null && !row.comparable_intervals && (row.estimated_spend != null || row.net_change != null)))
   }
 
   definePlugin({ pages: { sites: {
@@ -302,7 +303,7 @@
           h('span', row.comparable_intervals > 0 ? `已计价 ${row.priced_intervals ?? 0} / ${row.comparable_intervals} 段` : '—'),
           h('small', `未计价下降 ${amountText(row.unpriced_drop, row.unit)}`),
           reasons.length ? h('small', reasons.join('、')) : null,
-          row.hasLegacyCoverage || legacyCoverage(row) ? h('small', '旧日汇总缺少计价证据，区间数未知') : null,
+          hasUnknownCoverage(row) ? h('small', '旧日汇总缺少计价证据，区间数未知') : null,
         ])
       }
       function calendarRange(range) {
