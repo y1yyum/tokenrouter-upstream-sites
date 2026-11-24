@@ -231,6 +231,7 @@ func TestRollupKeepsCompleteLegacyBucketWithIncompleteRaw(t *testing.T) {
 			require.Nil(t, daily[0].UpstreamCost)
 			require.Nil(t, daily[0].EstimatedCostCNY)
 			require.Nil(t, daily[0].OpenBalance)
+			require.True(t, daily[0].HasUnknownCoverage)
 			require.Equal(t, pricingUnknown, daily[0].PricingStatus)
 
 			next := rollupSample(s, last.At.Add(time.Hour), "new-a", "75", true)
@@ -247,6 +248,13 @@ func TestRollupKeepsCompleteLegacyBucketWithIncompleteRaw(t *testing.T) {
 			require.Equal(t, "5", *daily[0].EstimatedCostCNY)
 			require.Equal(t, "5", *daily[0].UnpricedDrop)
 			require.Equal(t, pricingPartial, daily[0].PricingStatus)
+			require.True(t, daily[0].HasUnknownCoverage)
+			require.Nil(t, daily[0].OpenBalance)
+			require.Nil(t, daily[0].MinBalance)
+			require.Nil(t, daily[0].MaxBalance)
+			require.Nil(t, daily[0].FirstSampleAt)
+			require.Equal(t, new("65"), daily[0].CloseBalance)
+			require.Equal(t, &end.At, daily[0].LastSampleAt)
 		})
 	}
 }
@@ -314,6 +322,56 @@ func TestRollupRebuildsCompleteLegacyEvidenceAndKeepsExpiredRawTotals(t *testing
 	require.Nil(t, result.Data[1].EstimatedCostCNY)
 }
 
+func TestRollupCompleteLegacyCrossDayUsesPublishedOriginalAmounts(t *testing.T) {
+	ctx := context.Background()
+	p, h := testPlugin(t)
+	s := addSite(t, p, "https://example.com")
+	midnight := rollupDayStart()
+	half := 10*time.Minute + 500*time.Millisecond
+	a := rollupSample(s, midnight.Add(-half), "a", "1.0000000001", false)
+	b := rollupSample(s, midnight.Add(half), "b", "1", false)
+	a.Balances[0].Used = new("6")
+	b.Balances[0].Used = new("6.0000000001")
+	for _, sample := range []Observation{a, b} {
+		putLegacyHistory(t, p, s, sample)
+		day := sample.At.Format(time.DateOnly)
+		legacy := []DailyStat{{
+			AlgorithmVersion: 1, Date: day, Timezone: "UTC", Unit: "USD",
+			WalletEpoch: 1, StatisticsEpoch: 1, AvailableOnly: true, CrossDay: true,
+			EstimatedSpend: new("0.0000000001"), AccountSpend: new("0.0000000001"),
+			NetChange: new("-0.0000000001"), CoveredSeconds: 600,
+		}}
+		_, err := p.kv.Put(ctx, "daily", fmtSource(s.ID, day), legacy)
+		require.NoError(t, err)
+	}
+
+	restarted := &Plugin{}
+	require.NoError(t, restarted.Init(ctx, h.Env))
+	daily, err := restarted.readDaily(ctx, s)
+	require.NoError(t, err)
+	require.Len(t, daily, 2)
+	for _, day := range daily {
+		require.Equal(t, dailyAlgorithmVersion, day.AlgorithmVersion)
+		require.False(t, day.HasUnknownCoverage)
+		require.Equal(t, new("0.0000000001"), day.EstimatedSpend)
+		require.Equal(t, new("0.0000000001"), day.AccountSpend)
+		require.Equal(t, new("-0.0000000001"), day.NetChange)
+		require.Nil(t, day.EstimatedCostCNY)
+	}
+	require.Equal(t, new("0"), daily[0].UpstreamCost)
+	require.Equal(t, new("0.0000000001"), daily[1].UpstreamCost)
+	require.Equal(t, new("1"), daily[0].OpenBalance)
+
+	c := rollupSample(s, b.At.Add(time.Hour), "c", "0.9", true)
+	completeRollupSample(t, restarted, s, c)
+	daily, err = restarted.readDaily(ctx, s)
+	require.NoError(t, err)
+	require.Equal(t, new("0.1000000001"), daily[0].EstimatedSpend)
+	require.Equal(t, new("0.0000000001"), daily[0].AccountSpend)
+	require.Equal(t, new("-0.1000000001"), daily[0].NetChange)
+	require.Equal(t, new("0.1"), daily[0].UpstreamCost)
+}
+
 func TestRollupResumesAfterDowngradeRewritesSites(t *testing.T) {
 	ctx := context.Background()
 	p, h := testPlugin(t)
@@ -367,6 +425,97 @@ func TestRollupResumesAfterDowngradeRewritesSites(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 5, progress.Sequence)
 	require.Equal(t, "e", progress.Previous.RunID)
+}
+
+func TestRollupCutsPriceOnlyAfterLegacyRewrite(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		failed bool
+		legacy bool
+	}{
+		{name: "normal restart"},
+		{name: "current version 401", failed: true},
+		{name: "legacy 401 followed by a probe", failed: true, legacy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			p, h := testPlugin(t)
+			s := addSite(t, p, "https://example.com")
+			require.NoError(t, p.prepareRollup(ctx, s.ID))
+			at := rollupDayStart().Add(10 * time.Hour)
+			a := rollupSample(s, at, "a", "100", true)
+			b := rollupSample(s, at.Add(time.Hour), "b", "80", true)
+			completeRollupSample(t, p, s, a)
+			completeRollupSample(t, p, s, b)
+
+			failure := rollupSample(s, b.At.Add(10*time.Minute), "wallet-401", "", false)
+			failure.Outcome, failure.HTTPStatus, failure.Code, failure.Balances = Authentication, 401, errAuth.Error(), nil
+			if test.legacy {
+				probe := Observation{At: failure.At.Add(time.Minute), RunID: "probe-ok", Source: "probe", Outcome: Healthy}
+				putLegacyHistory(t, p, s, failure)
+				putLegacyHistory(t, p, s, probe)
+				var stored StoredSite
+				_, err := p.read(ctx, "sites", "1", &stored)
+				require.NoError(t, err)
+				latest := rollupSample(s, b.At, b.RunID, "80", false)
+				stored.Site.Latest = &latest
+				stored.Site.LastObservation = &probe
+				stored.Site.LastBalanceObservation = nil
+				stored.Rollup = nil
+				_, err = p.kv.Put(ctx, "sites", "1", stored)
+				require.NoError(t, err)
+			} else if test.failed {
+				completeRollupSample(t, p, s, failure)
+			}
+
+			h.Env.PreviousVersion = "1.1.1"
+			restarted := &Plugin{}
+			require.NoError(t, restarted.Init(ctx, h.Env))
+			if test.failed {
+				var stored StoredSite
+				_, err := restarted.read(ctx, "sites", "1", &stored)
+				require.NoError(t, err)
+				require.NotNil(t, stored.Site.LastBalanceObservation)
+				require.Equal(t, failure.RunID, stored.Site.LastBalanceObservation.RunID)
+				require.Equal(t, 401, stored.Site.LastBalanceObservation.HTTPStatus)
+				if test.legacy {
+					require.Equal(t, "probe-ok", stored.Site.LastObservation.RunID)
+					list := readPricingResponse[struct{ Sites []Site }](t, call(t, restarted, http.MethodGet, "/sites", nil))
+					require.Len(t, list.Sites, 1)
+					require.NotNil(t, list.Sites[0].LastBalanceObservation)
+					require.Equal(t, 401, list.Sites[0].LastBalanceObservation.HTTPStatus)
+				}
+			}
+
+			c := rollupSample(s, b.At.Add(20*time.Minute), "c", "72", true)
+			acceptRollupSample(t, restarted, s, c)
+			// 待办在重启后仍须使用接纳时确定的价格边界。
+			restarted = &Plugin{}
+			require.NoError(t, restarted.Init(ctx, h.Env))
+			daily, err := restarted.readDaily(ctx, s)
+			require.NoError(t, err)
+			require.Len(t, daily, 1)
+			require.Equal(t, new("28"), daily[0].UpstreamCost)
+			if test.legacy {
+				require.Equal(t, new("10"), daily[0].EstimatedCostCNY)
+				require.Equal(t, new("8"), daily[0].UnpricedDrop)
+			} else {
+				require.Equal(t, new("14"), daily[0].EstimatedCostCNY)
+				require.Nil(t, daily[0].UnpricedDrop)
+			}
+
+			d := rollupSample(s, c.At.Add(time.Hour), "d", "64", true)
+			completeRollupSample(t, restarted, s, d)
+			daily, err = restarted.readDaily(ctx, s)
+			require.NoError(t, err)
+			require.Equal(t, new("36"), daily[0].UpstreamCost)
+			if test.legacy {
+				require.Equal(t, new("14"), daily[0].EstimatedCostCNY)
+			} else {
+				require.Equal(t, new("18"), daily[0].EstimatedCostCNY)
+			}
+		})
+	}
 }
 
 func TestRollupFindsDowngradeHistoryWithoutSiteRewrite(t *testing.T) {

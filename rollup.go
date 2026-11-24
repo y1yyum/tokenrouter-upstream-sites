@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -28,15 +29,26 @@ type rollupProgress struct {
 
 type siteRollup struct {
 	rollupProgress
-	Backfill *rollupBackfill `json:"backfill,omitempty"`
+	Backfill      *rollupBackfill `json:"backfill,omitempty"`
+	PriceBoundary bool            `json:"price_boundary,omitempty"`
 }
 
 type rollupWork struct {
-	Sample      Observation          `json:"sample"`
-	RawDays     int                  `json:"raw_days"`
-	SummaryDays int                  `json:"summary_days"`
-	Through     *observationPosition `json:"backfill_through,omitempty"`
-	LegacyBases map[string]DailyStat `json:"legacy_bases,omitempty"`
+	Sample        Observation                `json:"sample"`
+	RawDays       int                        `json:"raw_days"`
+	SummaryDays   int                        `json:"summary_days"`
+	Through       *observationPosition       `json:"backfill_through,omitempty"`
+	LegacyBases   map[string]legacyDailyBase `json:"legacy_bases,omitempty"`
+	PriceBoundary bool                       `json:"price_boundary,omitempty"`
+}
+
+func (state *siteRollup) enqueue(work rollupWork) {
+	if walletSample(work.Sample) {
+		work.PriceBoundary = state.PriceBoundary
+		state.PriceBoundary = false
+	}
+	state.Sequence++
+	state.Pending = &work
 }
 
 type observationPosition struct {
@@ -54,6 +66,11 @@ type dailyBucket struct {
 	Stat          DailyStat            `json:"stat"`
 	Legacy        *DailyStat           `json:"legacy,omitempty"`
 	LegacyThrough *observationPosition `json:"legacy_through,omitempty"`
+}
+
+type legacyDailyBase struct {
+	DailyStat
+	Verified bool `json:"verified,omitempty"`
 }
 
 func position(o Observation) observationPosition {
@@ -121,6 +138,7 @@ func (p *Plugin) addDailyBucket(ctx context.Context, id, sequence int64, delta D
 	key := dailyKey(id, delta)
 	for {
 		var bucket dailyBucket
+		var published *DailyStat
 		version, err := p.read(ctx, dailyCollection, key, &bucket)
 		if errors.Is(err, ErrNotFound) {
 			version = -1
@@ -130,7 +148,12 @@ func (p *Plugin) addDailyBucket(ctx context.Context, id, sequence int64, delta D
 					return err
 				}
 			} else if legacy, found := work.LegacyBases[key]; found {
-				bucket.Legacy, bucket.LegacyThrough = &legacy, work.Through
+				bucket.LegacyThrough = work.Through
+				if legacy.Verified {
+					published = &legacy.DailyStat
+				} else {
+					bucket.Legacy = &legacy.DailyStat
+				}
 			}
 		} else if err != nil {
 			return err
@@ -143,8 +166,17 @@ func (p *Plugin) addDailyBucket(ctx context.Context, id, sequence int64, delta D
 			return nil
 		}
 		bucket.Sequence = sequence
-		if bucket.LegacyThrough == nil || bucket.LegacyThrough.before(position(work.Sample)) {
-			mergeDailyStat(&bucket.Stat, delta)
+		includedInLegacy := bucket.LegacyThrough != nil && !bucket.LegacyThrough.before(position(work.Sample))
+		if !includedInLegacy || bucket.Legacy == nil {
+			part := delta
+			if includedInLegacy {
+				// 已发布的 v1 原币指标覆盖整个回填区间，v2 只补充新指标。
+				part.EstimatedSpend, part.AccountSpend, part.NetChange = nil, nil, nil
+			}
+			mergeDailyStat(&bucket.Stat, part)
+		}
+		if published != nil {
+			bucket.Stat.EstimatedSpend, bucket.Stat.AccountSpend, bucket.Stat.NetChange = published.EstimatedSpend, published.AccountSpend, published.NetChange
 		}
 		_, err = p.kv.Put(ctx, dailyCollection, key, bucket, sdk.IfVersion(version), sdk.TTL(ttl))
 		if !errors.Is(err, sdk.ErrVersionConflict) {
@@ -210,7 +242,17 @@ func (p *Plugin) finishRollup(ctx context.Context, key string, stored StoredSite
 }
 
 func (p *Plugin) rollupDays(ctx context.Context, id int64, progress rollupProgress, work rollupWork) error {
-	for _, delta := range pairDaily(progress.Previous, work.Sample) {
+	previous := progress.Previous
+	if work.PriceBoundary && previous != nil {
+		// 回退期间的倍率历史未知。沿用原币余额和可比口径，重新建立计价基线。
+		prior := *previous
+		prior.Balances = slices.Clone(previous.Balances)
+		for i := range prior.Balances {
+			prior.Balances[i].Price = nil
+		}
+		previous = &prior
+	}
+	for _, delta := range pairDaily(previous, work.Sample) {
 		expires, err := localDayEnd(delta.Date, delta.Timezone, work.SummaryDays)
 		if err != nil {
 			return err
@@ -246,8 +288,9 @@ func (p *Plugin) prepareRollup(ctx context.Context, id int64) error {
 func (p *Plugin) resumeRollup(ctx context.Context, id int64, checkLegacyHistory bool) error {
 	key := strconv.FormatInt(id, 10)
 	var samples []Observation
+	var lastBalance *Observation
 	var loaded bool
-	var bases map[string]DailyStat
+	var bases map[string]legacyDailyBase
 	var plannedThrough observationPosition
 	for {
 		var stored StoredSite
@@ -273,7 +316,7 @@ func (p *Plugin) resumeRollup(ctx context.Context, id int64, checkLegacyHistory 
 			}
 		}
 		if !loaded {
-			samples, err = p.backfillSamples(ctx, stored.Site)
+			samples, lastBalance, err = p.backfillSamples(ctx, stored.Site)
 			if err != nil {
 				return err
 			}
@@ -286,7 +329,9 @@ func (p *Plugin) resumeRollup(ctx context.Context, id int64, checkLegacyHistory 
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
-			state = &siteRollup{rollupProgress: progress}
+			// 镜像还在而站点标记消失时，旧运行时重写过站点。即使旧查询
+			// 只得到 401，下一次成功样本也要开始新的价格段。
+			state = &siteRollup{rollupProgress: progress, PriceBoundary: err == nil}
 			if len(samples) != 0 {
 				state.Backfill = &rollupBackfill{Through: position(samples[len(samples)-1])}
 				if errors.Is(err, ErrNotFound) {
@@ -320,19 +365,23 @@ func (p *Plugin) resumeRollup(ctx context.Context, id int64, checkLegacyHistory 
 			if i == len(samples) || state.Backfill.Through.before(position(samples[i])) {
 				state.Backfill = nil
 			} else {
-				state.Sequence++
-				work := &rollupWork{Sample: samples[i], SummaryDays: summary, Through: &state.Backfill.Through}
+				work := rollupWork{Sample: samples[i], SummaryDays: summary, Through: &state.Backfill.Through}
 				for _, delta := range pairDaily(state.Previous, work.Sample) {
 					key := dailyKey(id, delta)
 					if legacy, found := bases[key]; found {
 						if work.LegacyBases == nil {
-							work.LegacyBases = make(map[string]DailyStat)
+							work.LegacyBases = make(map[string]legacyDailyBase)
 						}
 						work.LegacyBases[key] = legacy
 					}
 				}
-				state.Pending = work
+				state.enqueue(work)
 			}
+		}
+		latest := stored.Site.LastBalanceObservation
+		if lastBalance != nil && lastBalance.WalletEpoch == stored.Site.WalletEpoch &&
+			(latest == nil || position(*latest).before(position(*lastBalance))) {
+			stored.Site.LastBalanceObservation = lastBalance
 		}
 		_, err = p.kv.Put(ctx, "sites", key, stored, sdk.IfVersion(version))
 		if err != nil && !errors.Is(err, sdk.ErrVersionConflict) {
@@ -387,12 +436,12 @@ func (p *Plugin) legacyDailyRow(ctx context.Context, id int64, delta DailyStat) 
 
 // 覆盖或原币指标对不上时，保留 v1 日桶作为基数。待办随序号记录
 // 受影响的基数，跨日写入中断后仍按同一个回填截止点续跑。
-func (p *Plugin) backfillLegacyBases(ctx context.Context, id int64, samples []Observation, state *siteRollup) (map[string]DailyStat, error) {
+func (p *Plugin) backfillLegacyBases(ctx context.Context, id int64, samples []Observation, state *siteRollup) (map[string]legacyDailyBase, error) {
 	rows, err := p.records(ctx, "daily", fmtSource(id, ""))
 	if err != nil {
 		return nil, err
 	}
-	bases := make(map[string]DailyStat)
+	bases := make(map[string]legacyDailyBase)
 	if len(rows) == 0 {
 		return bases, nil
 	}
@@ -403,8 +452,8 @@ func (p *Plugin) backfillLegacyBases(ctx context.Context, id int64, samples []Ob
 		evidence = append([]Observation{*state.Previous}, evidence...)
 	}
 	rebuilt := dailyRows{}
-	for _, row := range DailyStats(evidence) {
-		rebuilt[row.key()] = row
+	for _, row := range legacyDailyEvidence(evidence) {
+		rebuilt[row.key()] = *row
 	}
 	for _, item := range rows {
 		var legacy []DailyStat
@@ -417,8 +466,9 @@ func (p *Plugin) backfillLegacyBases(ctx context.Context, id int64, samples []Ob
 				loc, loadErr := time.LoadLocation(row.Timezone)
 				partial = loadErr == nil && row.Date <= backfill.RawCutoff.In(loc).Format(time.DateOnly)
 			}
-			if partial || !matchesLegacyDaily(row, rebuilt[row.key()]) {
-				bases[dailyKey(id, row)] = row
+			verified := !partial && matchesLegacyDaily(row, rebuilt[row.key()])
+			if !verified || backfill.RawCutoff != nil {
+				bases[dailyKey(id, row)] = legacyDailyBase{DailyStat: row, Verified: verified}
 			}
 		}
 	}
@@ -437,10 +487,10 @@ func (bucket dailyBucket) report() DailyStat {
 	if bucket.Legacy == nil {
 		return bucket.Stat
 	}
-	row := *bucket.Legacy
-	row.PricingStatus = pricingUnknown
+	row := legacyDailyReport(*bucket.Legacy)
 	if bucket.Stat.Date != "" {
 		mergeDailyStat(&row, bucket.Stat)
+		row.OpenBalance, row.MinBalance, row.MaxBalance, row.FirstSampleAt = nil, nil, nil, nil
 		if row.EstimatedCostCNY != nil {
 			row.PricingStatus = pricingPartial
 		}
@@ -448,14 +498,31 @@ func (bucket dailyBucket) report() DailyStat {
 	return row
 }
 
-func (p *Plugin) backfillSamples(ctx context.Context, s Site) ([]Observation, error) {
+func legacyDailyReport(row DailyStat) DailyStat {
+	row.HasUnknownCoverage = true
+	row.PricingStatus = pricingUnknown
+	return row
+}
+
+func (p *Plugin) backfillSamples(ctx context.Context, s Site) ([]Observation, *Observation, error) {
 	history, err := p.history(ctx, s.ID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	samples := make([]Observation, 0, len(history)+1)
+	var lastBalance *Observation
+	considerBalance := func(o *Observation) {
+		if o != nil && o.Source == "balance" && o.WalletEpoch == s.WalletEpoch &&
+			(lastBalance == nil || position(*lastBalance).before(position(*o))) {
+			lastBalance = o
+		}
+	}
+	considerBalance(s.Latest)
+	considerBalance(s.LastObservation)
 	var seenLatest bool
-	for _, o := range history {
+	for i := range history {
+		o := history[i]
+		considerBalance(&history[i])
 		if walletSample(o) {
 			samples = append(samples, o)
 			seenLatest = seenLatest || (s.Latest != nil && position(o) == position(*s.Latest))
@@ -465,7 +532,7 @@ func (p *Plugin) backfillSamples(ctx context.Context, s Site) ([]Observation, er
 		samples = append(samples, *s.Latest)
 	}
 	sort.Slice(samples, func(i, j int) bool { return position(samples[i]).before(position(samples[j])) })
-	return samples, nil
+	return samples, lastBalance, nil
 }
 
 // 日报读取只合并两个版本的现有日桶，单站告警可限定到当天。
@@ -494,10 +561,7 @@ func (p *Plugin) readDailyForDay(ctx context.Context, s Site, date string) ([]Da
 			return nil, err
 		}
 		for _, row := range values {
-			if row.PricingStatus == "" {
-				row.PricingStatus = pricingUnknown
-			}
-			include(row)
+			include(legacyDailyReport(row))
 		}
 	}
 	if date != "" {

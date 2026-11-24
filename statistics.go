@@ -42,6 +42,7 @@ type DailyStat struct {
 	PricedIntervals     int            `json:"priced_intervals"`
 	ComparableIntervals int            `json:"comparable_intervals"`
 	UnpricedReasons     map[string]int `json:"unpriced_reasons,omitempty"`
+	HasUnknownCoverage  bool           `json:"has_unknown_coverage,omitempty"`
 	CoveredSeconds      int64          `json:"covered_seconds"`
 	Gap                 bool           `json:"gap"`
 	CrossDay            bool           `json:"cross_day"`

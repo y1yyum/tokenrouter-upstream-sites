@@ -274,8 +274,7 @@ func (p *Plugin) acceptObservation(ctx context.Context, id int64, o Observation)
 		return current.Site, false, nil
 	}
 	rawDays, summaryDays := retentionDays(current.Site)
-	state.Sequence++
-	state.Pending = &rollupWork{Sample: o, RawDays: rawDays, SummaryDays: summaryDays}
+	state.enqueue(rollupWork{Sample: o, RawDays: rawDays, SummaryDays: summaryDays})
 	current.Site.LastObservation = &o
 	current.Site.State = Evaluate(current.Site.Config, current.Site.State, o)
 	if o.Source == "balance" {
