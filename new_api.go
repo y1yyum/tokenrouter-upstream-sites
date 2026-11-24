@@ -13,8 +13,19 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// New API wallet discovery follows the host adapter, without parsing key limits.
-// Only the token route's explicitly named user_balance fields are account funds.
+const newAPIUserQuotaField = "user_quota.total_available"
+
+type newAPIWalletDiagnostic string
+
+const (
+	newAPIKeyQuotaOnly            newAPIWalletDiagnostic = "NEW_API_KEY_QUOTA_ONLY"
+	newAPINoAccountBalanceWithKey newAPIWalletDiagnostic = "NEW_API_NO_ACCOUNT_BALANCE_WITH_KEY"
+)
+
+func (e newAPIWalletDiagnostic) Error() string            { return errWallet.Error() }
+func (e newAPIWalletDiagnostic) Unwrap() error            { return errWallet }
+func (e newAPIWalletDiagnostic) WalletDiagnostic() string { return string(e) }
+
 type newAPISettings struct {
 	unit         string
 	factor, rate decimal.Decimal
@@ -152,13 +163,25 @@ func (s newAPISettings) basis(path string, display bool) string {
 
 func newAPIEmbedded(body []byte, s newAPISettings) ([]Balance, bool, error) {
 	r, err := newAPIEnvelope(body)
-	if err != nil {
-		return nil, newAPIFirst(r.Get("data"), "user_balance_display", "user_balance").Exists(), err
-	}
 	d := r.Get("data")
 	field, v := newAPIField(d, "user_balance_display", "user_balance")
 	if !v.Exists() {
+		field, v = newAPIUserQuotaField, d.Get(newAPIUserQuotaField)
+	}
+	if err != nil {
+		return nil, v.Exists(), err
+	}
+	if !v.Exists() {
+		if _, e := walletNumber(d.Get("total_available")); e == nil && !d.Get("user_quota").Exists() {
+			return nil, false, newAPIKeyQuotaOnly
+		}
 		return nil, false, nil
+	}
+	if field == newAPIUserQuotaField {
+		// GetUserQuota returns a signed integer. Validate the JSON literal without a float conversion.
+		if _, e := strconv.ParseInt(v.Raw, 10, 64); v.Type != gjson.Number || e != nil {
+			return nil, true, errWallet
+		}
 	}
 	display := field == "user_balance_display"
 	unit := s.unit
@@ -275,6 +298,7 @@ func queryNewAPI(ctx context.Context, client *http.Client, base string, secret S
 	}
 	settings := newAPIDisplaySettings(ctx, client, base)
 	key, token := strings.TrimSpace(secret.Key), strings.TrimSpace(secret.WalletToken)
+	keyDiagnostic := newAPINoAccountBalanceWithKey
 	if key != "" {
 		body, status, e := request(ctx, client, endpoint(base, "/api/usage/token/"), key, "")
 		if e != nil || status == 401 || status == 403 || status == 429 || status >= 500 {
@@ -284,6 +308,9 @@ func queryNewAPI(ctx context.Context, client *http.Client, base string, secret S
 			wallet, present, e := newAPIEmbedded(body, settings)
 			if present || errors.Is(e, errAuth) {
 				return wallet, status, e
+			}
+			if errors.Is(e, newAPIKeyQuotaOnly) {
+				keyDiagnostic = newAPIKeyQuotaOnly
 			}
 		}
 	}
@@ -322,5 +349,8 @@ func queryNewAPI(ctx context.Context, client *http.Client, base string, secret S
 		return nil, status, nil
 	}
 	wallet, err := newAPICompatible(body, settings)
+	if token == "" && errors.Is(err, errWallet) {
+		return nil, status, keyDiagnostic
+	}
 	return wallet, status, err
 }

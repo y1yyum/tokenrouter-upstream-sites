@@ -91,6 +91,104 @@ func TestNewAPIAccountParsers(t *testing.T) {
 	}
 }
 
+func TestNewAPIUserQuotaUsesSiteDisplaySettings(t *testing.T) {
+	for _, tt := range []struct {
+		name, settings, quota string
+		want                  Balance
+	}{
+		{"USD large integer", `"quota_display_type":"USD","quota_per_unit":1000000,"usd_exchange_rate":7.3`, "9007199254740993",
+			Balance{Unit: "USD", Available: "9007199254.740993", Basis: "token.data.user_quota.total_available:raw:quota_per_unit=1000000"}},
+		{"CNY", `"quota_display_type":"CNY","quota_per_unit":1000000,"usd_exchange_rate":7.3`, "1234567",
+			Balance{Unit: "CNY", Available: "9.0123391", Basis: "token.data.user_quota.total_available:raw:quota_per_unit=1000000:usd_exchange_rate=7.3"}},
+		{"TOKENS large integer", `"quota_display_type":"TOKENS","quota_per_unit":1000000,"usd_exchange_rate":7.3`, "9223372036854775807",
+			Balance{Unit: "TOKENS", Available: "9223372036854775807", Basis: "token.data.user_quota.total_available:raw"}},
+		{"zero", `"quota_display_type":"USD"`, "0",
+			Balance{Unit: "USD", Available: "0", Basis: "token.data.user_quota.total_available:raw:quota_per_unit=500000"}},
+		{"debt", `"quota_display_type":"USD"`, "-500000",
+			Balance{Unit: "USD", Available: "-1", Basis: "token.data.user_quota.total_available:raw:quota_per_unit=500000"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/status":
+					fmt.Fprintf(w, `{"success":true,"data":{%s}}`, tt.settings)
+				case "/api/usage/token/":
+					fmt.Fprintf(w, `{"code":true,"data":{"object":"token_usage","currency":"USD","total_available":17,"total_used":41,"user_quota":{"total_available":%s,"total_used":500000}}}`, tt.quota)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			wallets, status, err := queryNewAPI(context.Background(), server.Client(), server.URL, Secrets{Key: "fixture"})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, status)
+			require.Equal(t, []Balance{tt.want}, wallets)
+		})
+	}
+}
+
+func TestNewAPIUserQuotaRejectsInvalidRawAmounts(t *testing.T) {
+	for _, raw := range []string{`null`, `false`, `[]`, `"123"`, `"bad"`, `1.25`, `9223372036854775808`} {
+		t.Run(raw, func(t *testing.T) {
+			body := fmt.Sprintf(`{"code":true,"data":{"total_available":17,"user_quota":{"total_available":%s}}}`, raw)
+			wallets, present, err := newAPIEmbedded([]byte(body), defaultNewAPISettings())
+			require.True(t, present)
+			require.Empty(t, wallets)
+			require.ErrorIs(t, err, errWallet)
+		})
+	}
+}
+
+func TestNewAPIKeyWalletDiagnostics(t *testing.T) {
+	for _, tt := range []struct {
+		name, tokenBody, compatBody, walletToken string
+		compatStatus                             int
+		wantErr                                  error
+		wantDiagnostic                           string
+	}{
+		{"key quota only", `{"code":true,"data":{"total_available":17}}`, `<html/>`, "", 200, errWallet, "NEW_API_KEY_QUOTA_ONLY"},
+		{"non JSON compatibility response", `{}`, `<html/>`, "", 200, errWallet, "NEW_API_NO_ACCOUNT_BALANCE_WITH_KEY"},
+		{"missing account fields", `{}`, `{"data":{}}`, "", 200, errWallet, "NEW_API_NO_ACCOUNT_BALANCE_WITH_KEY"},
+		{"partial account data", `{"data":{"total_available":17,"user_quota":{"total_used":42}}}`, `{}`, "", 200, errWallet, "NEW_API_NO_ACCOUNT_BALANCE_WITH_KEY"},
+		{"account token configured", `{}`, `<html/>`, "fixture-wallet", 200, errWallet, ""},
+		{"compatibility route missing", `{"data":{"total_available":17}}`, `<html/>`, "", 404, nil, ""},
+		{"explicit rejection", `{"data":{"total_available":17}}`, `{"success":false}`, "", 200, errAuth, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/status":
+					fmt.Fprint(w, `{}`)
+				case "/api/usage/token/":
+					fmt.Fprint(w, tt.tokenBody)
+				case "/api/user/self":
+					fmt.Fprint(w, `{}`)
+				case "/user/balance":
+					w.WriteHeader(tt.compatStatus)
+					fmt.Fprint(w, tt.compatBody)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			wallets, status, err := queryNewAPI(context.Background(), server.Client(), server.URL, Secrets{Key: "fixture", WalletToken: tt.walletToken})
+			require.Empty(t, wallets)
+			require.Equal(t, tt.compatStatus, status)
+			require.ErrorIs(t, err, tt.wantErr)
+			if tt.wantDiagnostic == "" {
+				require.Equal(t, tt.wantErr, err)
+				return
+			}
+			var diagnostic interface{ WalletDiagnostic() string }
+			require.ErrorAs(t, err, &diagnostic)
+			require.Equal(t, tt.wantDiagnostic, diagnostic.WalletDiagnostic())
+			require.NotErrorIs(t, err, errAuth)
+			require.EqualError(t, err, "SITE_BALANCE_UNAVAILABLE")
+		})
+	}
+}
+
 func TestNewAPIDiscoveryAndCredentials(t *testing.T) {
 	for _, tt := range []struct {
 		name, tokenBody, selfBody, compatBody string
@@ -99,19 +197,23 @@ func TestNewAPIDiscoveryAndCredentials(t *testing.T) {
 		paths                                 []string
 		outcome, amount                       string
 	}{
-		{"embedded", `{"data":{"user_balance":500000}}`, "", "", 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Healthy, "1"},
+		{"embedded display takes precedence", `{"data":{"user_balance_display":3,"user_balance":500000,"user_quota":{"total_available":1000000}}}`, "", "", 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Healthy, "3"},
+		{"embedded raw takes precedence", `{"data":{"user_balance":500000,"user_quota":{"total_available":1000000}}}`, "", "", 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Healthy, "1"},
+		{"official account quota stops discovery", `{"code":true,"data":{"total_available":17,"user_quota":{"total_available":13579246}}}`, "", "", 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Healthy, "27.158492"},
 		{"self", `{"data":{"total_available":999}}`, `{"data":{"id":42,"quota":1000000}}`, "", 200, 200, "api-key", "user-token", "0042", []string{"/api/status", "/api/usage/token/", "/api/user/self"}, Healthy, "2"},
 		{"compat fallback", `{}`, `<html/>`, `{"balance":3}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/", "/api/user/self", "/user/balance"}, Healthy, "3"},
+		{"key quota allows compat fallback", `{"code":true,"data":{"total_available":17}}`, "", `{"balance":3}`, 200, 200, "api-key", "", "", []string{"/api/status", "/api/usage/token/", "/user/balance"}, Healthy, "3"},
 		{"missing token route", "", "", `{"remaining":4}`, 404, 200, "api-key", "", "", []string{"/api/status", "/api/usage/token/", "/user/balance"}, Healthy, "4"},
 		{"no API key self works", "", `{"data":{"id":42,"quota":1000000}}`, "", 200, 200, "", "user-token", "42", []string{"/api/status", "/api/user/self"}, Healthy, "2"},
 		{"mismatch blocks fallback", `{}`, `{"data":{"id":43,"quota":1000000}}`, `{"balance":9}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/", "/api/user/self"}, Authentication, ""},
 		{"self 401 blocks fallback", `{}`, `{}`, `{"balance":9}`, 200, 401, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/", "/api/user/self"}, Authentication, ""},
 		{"self 429 blocks fallback", `{}`, `{}`, `{"balance":9}`, 200, 429, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/", "/api/user/self"}, RateLimited, ""},
 		{"self 503 may use compatible wallet", `{}`, `{}`, `{"balance":9}`, 200, 503, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/", "/api/user/self", "/user/balance"}, Healthy, "9"},
-		{"token 403", `{}`, `{}`, `{}`, 403, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Authentication, ""},
+		{"token 403", `{"data":{"user_quota":{"total_available":1000000}}}`, `{}`, `{}`, 403, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Authentication, ""},
 		{"token outage", `{}`, `{}`, `{}`, 503, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Unreachable, ""},
-		{"false token code", `{"code":false}`, `{}`, `{}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Authentication, ""},
-		{"invalid preferred cannot fallback", `{"data":{"user_balance_display":"bad"}}`, `{}`, `{"balance":9}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Unknown, ""},
+		{"false token code", `{"code":false,"data":{"user_quota":{"total_available":1000000}}}`, `{}`, `{}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Authentication, ""},
+		{"invalid preferred cannot fallback", `{"data":{"user_balance_display":"bad","user_quota":{"total_available":1000000}}}`, `{}`, `{"balance":9}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Unknown, ""},
+		{"invalid official account quota cannot fallback", `{"code":true,"data":{"total_available":17,"user_quota":{"total_available":false}}}`, `{}`, `{"balance":9}`, 200, 200, "api-key", "user-token", "42", []string{"/api/status", "/api/usage/token/"}, Unknown, ""},
 		{"only key fields", `{"data":{"total_available":999,"quota":500000}}`, "", `<html/>`, 200, 200, "api-key", "", "", []string{"/api/status", "/api/usage/token/", "/user/balance"}, Unknown, ""},
 		{"invalid configured ID no requests", `{}`, `{}`, `{}`, 200, 200, "api-key", "user-token", "42.5", nil, Configuration, ""},
 	} {
