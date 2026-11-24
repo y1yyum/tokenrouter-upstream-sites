@@ -32,6 +32,8 @@
 
 例如余额依次为 100、80、130、120，观察到的上涨是 50，两次下降合计 30。倍率为 2 时成本为 15 元，最后的 120 额度折合 60 元。两次采样之间同时充值和消费会抵消，只能估算。记录页另列上游可提供的账户累计消费差额、缺测补记、未计价下降额和实测余额范围。跨倍率的区间保留原单位下降额。
 
+管理员可通过 `GET /api/v1/plugins/local.upstream-sites/api/statistics/overview` 读取总览。`period` 接受 `today`（默认）、`7d`、`30d` 或 `retained`。例如 `?period=7d&timezone=Asia%2FShanghai` 读取上海时区站点近 7 个日历日的成本。当前余额仍覆盖所有符合条件的站点。单站每日记录从同一前缀下的 `GET /sites/{id}/daily` 读取。
+
 ## New API 账户余额
 
 查询顺序为 `/api/status`、`/api/usage/token/` 的账户字段、可选的 `/api/user/self`、最后 `/user/balance`。`total_granted`、`total_used`、`total_available`、单 Key 的 `quota` 和无限额度标志均不作为账户余额，也不校验 Key 限额是否一致。仅有账户访问令牌时可直接查询用户接口。
