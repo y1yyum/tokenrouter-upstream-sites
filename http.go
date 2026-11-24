@@ -57,15 +57,13 @@ func (p *Plugin) Handler() http.Handler {
 	mux.HandleFunc("GET /sites/{id}/history", p.historyHTTP)
 	mux.HandleFunc("GET /sites/{id}/daily", func(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-		p.mu.Lock()
-		defer p.mu.Unlock()
 		var s StoredSite
 		_, e := p.read(r.Context(), "sites", strconv.FormatInt(id, 10), &s)
 		if e != nil {
 			reply(w, nil, e)
 			return
 		}
-		d, e := p.rebuild(r.Context(), s.Site)
+		d, e := p.readDaily(r.Context(), s.Site)
 		reply(w, d, e)
 	})
 	mux.HandleFunc("GET /sites/{id}/alerts", func(w http.ResponseWriter, r *http.Request) {

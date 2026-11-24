@@ -138,9 +138,12 @@ func TestEditingAndStatisticsAreIdempotent(t *testing.T) {
 		_, e = p.kv.Put(context.Background(), "history", fmtSource(1, amount), o)
 		require.NoError(t, e)
 	}
-	a, e := p.rebuild(context.Background(), record.Site)
+	require.NoError(t, p.prepareRollup(context.Background(), record.Site.ID))
+	a, e := p.readDaily(context.Background(), record.Site)
 	require.NoError(t, e)
-	b, e := p.rebuild(context.Background(), record.Site)
+	require.NotEmpty(t, a)
+	require.NoError(t, p.prepareRollup(context.Background(), record.Site.ID))
+	b, e := p.readDaily(context.Background(), record.Site)
 	require.NoError(t, e)
 	require.Equal(t, a, b)
 }
