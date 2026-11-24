@@ -6,6 +6,8 @@
 
 账户余额解析、金额模型、统计及加密等部分代码沿用此前基于 TokenRouter 的定制实现。New API 账户余额行为对照 TokenRouter v0.7.1 的 `backend/internal/upstream/usageprovider/adapters.go` 实现，插件只采用账户余额，并使用十进制与精确整数校验。
 
+1.2.0 的原单位余额下降、长缺测补记和跨日尾差处理参考了 Sub2API Custom 同源站点模块的 LGPL-3.0-or-later 实现。[固定源码](https://github.com/y1yyum/sub2api-custom-public/blob/0210f80e39596f9619bb1fc28638ec22a7a248f4/backend/internal/upstreamsites/statistics.go) · [来源与许可证](https://github.com/y1yyum/sub2api-custom-public/blob/0210f80e39596f9619bb1fc28638ec22a7a248f4/backend/internal/upstreamsites/THIRD_PARTY_NOTICES.md)
+
 `vendor/github.com/TokenFlux/TokenRouter/plugin-sdk/go/` 包含官方插件 SDK，使用 MIT 许可证，保留原始版权声明与许可证。其他第三方依赖及其版本见 `go.mod`、`go.sum` 和 `vendor/modules.txt`；各依赖许可证保留在相应 `vendor` 目录中。
 
 当前 SDK 使用随源码提供的 vendor 副本构建。`go.mod` 的本地 replace 用于原开发环境；本仓库的构建和测试命令显式使用 `-mod=vendor`，不需要相邻的 TokenRouter 源码目录。更新依赖前请先准备兼容的 SDK 源码，不要直接移除 vendor 后执行依赖更新。
