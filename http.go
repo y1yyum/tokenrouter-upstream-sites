@@ -42,6 +42,7 @@ type SaveRequest struct {
 // Handler registers only admin-authenticated routes declared by the manifest.
 func (p *Plugin) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /statistics/overview", p.overviewHTTP)
 	mux.HandleFunc("GET /sites", p.listHTTP)
 	mux.HandleFunc("POST /sites", p.saveHTTP)
 	mux.HandleFunc("PUT /sites/{id}", p.saveHTTP)
