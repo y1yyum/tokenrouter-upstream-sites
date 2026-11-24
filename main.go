@@ -225,14 +225,23 @@ func (p *Plugin) query(ctx context.Context, id int64, source string) (Observatio
 	if current.Site.ConfigVersion != s.ConfigVersion || current.Site.Archived {
 		return o, ErrConflict
 	}
+	if source == "balance" && o.Outcome == Healthy {
+		for i := range o.Balances {
+			price := s.PriceFor(o.Balances[i].Unit)
+			o.Balances[i].Price = &price
+		}
+	}
 	_, err = p.kv.Put(ctx, "history", fmtSource(id, o.At.UTC().Format(time.RFC3339Nano)+":"+o.RunID), o, sdk.IfAbsent(), sdk.TTL(time.Duration(s.Config.RawRetentionDays)*24*time.Hour))
 	if err != nil {
 		return o, err
 	}
 	current.Site.LastObservation = &o
 	current.Site.State = Evaluate(current.Site.Config, current.Site.State, o)
-	if source == "balance" && o.Outcome == Healthy {
-		current.Site.Latest = &o
+	if source == "balance" {
+		current.Site.LastBalanceObservation = &o
+		if o.Outcome == Healthy {
+			current.Site.Latest = &o
+		}
 	}
 	if current.Site.NextDue == nil {
 		current.Site.NextDue = map[string]time.Time{}

@@ -87,13 +87,18 @@ func newAPINumber(v gjson.Result) (decimal.Decimal, error) {
 }
 
 func newAPIFirst(r gjson.Result, fields ...string) gjson.Result {
+	_, v := newAPIField(r, fields...)
+	return v
+}
+
+func newAPIField(r gjson.Result, fields ...string) (string, gjson.Result) {
 	for _, field := range fields {
 		v := r.Get(field)
 		if v.Exists() && v.Type != gjson.Null {
-			return v
+			return field, v
 		}
 	}
-	return gjson.Result{}
+	return "", gjson.Result{}
 }
 
 func newAPIEnvelope(body []byte) (gjson.Result, error) {
@@ -130,17 +135,32 @@ func (s newAPISettings) amount(v gjson.Result, display bool) (string, error) {
 	return walletNumber(gjson.Result{Type: gjson.String, Str: n.String()})
 }
 
+// basis identifies how the available amount was read and normalized.
+func (s newAPISettings) basis(path string, display bool) string {
+	if display {
+		return path + ":display"
+	}
+	basis := path + ":raw"
+	if s.unit != "TOKENS" {
+		basis += ":quota_per_unit=" + s.factor.String()
+		if s.unit == "CNY" {
+			basis += ":usd_exchange_rate=" + s.rate.String()
+		}
+	}
+	return basis
+}
+
 func newAPIEmbedded(body []byte, s newAPISettings) ([]Balance, bool, error) {
 	r, err := newAPIEnvelope(body)
 	if err != nil {
 		return nil, newAPIFirst(r.Get("data"), "user_balance_display", "user_balance").Exists(), err
 	}
 	d := r.Get("data")
-	v := newAPIFirst(d, "user_balance_display", "user_balance")
+	field, v := newAPIField(d, "user_balance_display", "user_balance")
 	if !v.Exists() {
 		return nil, false, nil
 	}
-	display := newAPIFirst(d, "user_balance_display").Exists()
+	display := field == "user_balance_display"
 	unit := s.unit
 	if display {
 		unit, _ = newAPIUnit(d.Get("currency").String(), s.unit)
@@ -149,7 +169,7 @@ func newAPIEmbedded(body []byte, s newAPISettings) ([]Balance, bool, error) {
 	if err != nil {
 		return nil, true, err
 	}
-	return []Balance{{Unit: unit, Available: n}}, true, nil
+	return []Balance{{Unit: unit, Available: n, Basis: s.basis("token.data."+field, display)}}, true, nil
 }
 
 func newAPISelf(body []byte, s newAPISettings, expectedID string) ([]Balance, error) {
@@ -173,7 +193,7 @@ func newAPISelf(body []byte, s newAPISettings, expectedID string) ([]Balance, er
 		return nil, err
 	}
 	// used_quota is lifetime usage, not an account wallet capacity component.
-	return []Balance{{Unit: unit, Available: n}}, nil
+	return []Balance{{Unit: unit, Available: n, Basis: s.basis("self.data.quota", display)}}, nil
 }
 
 func newAPICompatible(body []byte, s newAPISettings) ([]Balance, error) {
@@ -186,15 +206,18 @@ func newAPICompatible(body []byte, s newAPISettings) ([]Balance, error) {
 		return nil, errWallet
 	}
 	infos := r.Get("balance_infos")
+	listPath := "balance_infos"
 	if v := d.Get("balance_infos"); v.IsArray() && len(v.Array()) > 0 {
 		infos = v
+		listPath = "data.balance_infos"
 	}
-	selected, nested := r, false
+	selected, nested, path := r, false, "compatible"
 	if infos.Exists() && infos.Type != gjson.Null && !infos.IsArray() {
 		return nil, errWallet
 	}
 	if list := infos.Array(); len(list) > 0 {
 		selected = list[0]
+		path += "." + listPath
 		for _, item := range list {
 			if unit, _ := newAPIUnit(item.Get("currency").String(), s.unit); unit == s.unit {
 				selected = item
@@ -203,6 +226,7 @@ func newAPICompatible(body []byte, s newAPISettings) ([]Balance, error) {
 		}
 	} else if d.IsObject() {
 		selected, nested = d, true
+		path += ".data"
 	}
 	unit, display := newAPIUnit(selected.Get("currency").String(), s.unit)
 	if strings.TrimSpace(selected.Get("currency").String()) == "" && (!nested || !newAPIFirst(selected, "quota").Exists()) {
@@ -212,11 +236,12 @@ func newAPICompatible(body []byte, s newAPISettings) ([]Balance, error) {
 	if nested {
 		fields = append(fields, "quota")
 	}
-	n, err := s.amount(newAPIFirst(selected, fields...), display)
+	field, v := newAPIField(selected, fields...)
+	n, err := s.amount(v, display)
 	if err != nil {
 		return nil, err
 	}
-	w := Balance{Unit: unit, Available: n}
+	w := Balance{Unit: unit, Available: n, Basis: s.basis(path+"."+field, display)}
 	used := newAPIFirst(selected, "used_balance", "used")
 	if nested {
 		used = newAPIFirst(selected, "used", "used_quota")

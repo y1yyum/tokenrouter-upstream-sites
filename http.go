@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +107,13 @@ func reply(w http.ResponseWriter, data any, err error) {
 		status := 500
 		message := "操作失败，请检查插件运行日志和配置"
 		switch {
+		case errors.Is(err, errBalanceMultipliers):
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"message": "余额倍率须为正十进制数，最多 10 位小数，单位须为 USD、CNY 或 TOKENS",
+				"field":   "config.balance_multipliers",
+			})
+			return
 		case errors.Is(err, ErrInvalid):
 			status = 400
 			message = "配置无效，请检查阈值、模式和必需探针"
@@ -160,12 +169,16 @@ func (p *Plugin) saveHTTP(w http.ResponseWriter, r *http.Request) {
 	req.Config.Timezone = "Asia/Shanghai"
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024))
 	d.DisallowUnknownFields()
-	if d.Decode(&req) != nil {
-		reply(w, nil, ErrInvalid)
+	if err := d.Decode(&req); err != nil {
+		if errors.Is(err, errBalanceMultipliers) {
+			reply(w, nil, errBalanceMultipliers)
+		} else {
+			reply(w, nil, ErrInvalid)
+		}
 		return
 	}
-	if req.Config.Validate() != nil {
-		reply(w, nil, ErrInvalid)
+	if err := req.Config.Validate(); err != nil {
+		reply(w, nil, err)
 		return
 	}
 	if req.Config.Policy.Mode != "off" {
@@ -218,6 +231,8 @@ func (p *Plugin) saveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		stored.Site = Site{ID: id, WalletEpoch: 1, StatisticsEpoch: 1, NextDue: map[string]time.Time{}, State: State{Reasons: map[string]time.Time{}, Counters: map[string]Counter{}, Version: 1}}
 	}
+	previousSecret := secret
+	previousSecret.ProbeKeys = maps.Clone(secret.ProbeKeys)
 	walletChanged := version > 0 && (req.Config.BaseURL != stored.Site.Config.BaseURL || req.Config.Adapter != stored.Site.Config.Adapter)
 	if req.Secrets != nil {
 		v := req.Secrets
@@ -269,6 +284,7 @@ func (p *Plugin) saveHTTP(w http.ResponseWriter, r *http.Request) {
 		stored.Site.WalletEpoch++
 		stored.Site.Latest = nil
 		stored.Site.LastObservation = nil
+		stored.Site.LastBalanceObservation = nil
 	}
 	if version > 0 && req.Config.Timezone != stored.Site.Config.Timezone {
 		stored.Site.StatisticsEpoch++
@@ -297,7 +313,17 @@ func (p *Plugin) saveHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, nil, e)
 		return
 	}
-	stored.Site.State = Reconfigure(req.Config, stored.Site.State)
+	pricingOnly := false
+	if req.Config.BalanceMultipliers == nil {
+		req.Config.BalanceMultipliers = stored.Site.Config.BalanceMultipliers
+	} else {
+		pricingOnly = version > 0 && !walletChanged && req.Archived == stored.Site.Archived &&
+			sameConfigExceptBalanceMultipliers(req.Config, stored.Site.Config) && reflect.DeepEqual(secret, previousSecret)
+		stored.Site.updateBalancePriceRevisions(req.Config, time.Now().UTC())
+	}
+	if !pricingOnly {
+		stored.Site.State = Reconfigure(req.Config, stored.Site.State)
+	}
 	stored.Site.Config = req.Config
 	stored.Site.ConfigVersion++
 	stored.Site.HasKey = secret.Key != "" || secret.WalletToken != ""
@@ -308,6 +334,11 @@ func (p *Plugin) saveHTTP(w http.ResponseWriter, r *http.Request) {
 		e = p.reconcile(r.Context())
 	}
 	reply(w, stored.Site, e)
+}
+
+func sameConfigExceptBalanceMultipliers(a, b Config) bool {
+	a.BalanceMultipliers, b.BalanceMultipliers = nil, nil
+	return reflect.DeepEqual(a, b)
 }
 
 // historyHTTP provides bounded pages while retaining exact imported observations.

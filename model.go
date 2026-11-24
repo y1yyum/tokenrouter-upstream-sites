@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/mail"
 	"net/url"
 	"strings"
@@ -39,6 +41,7 @@ var (
 	ErrBound               = errors.New("upstream site still has bound providers")
 	ErrBlocked             = errors.New("provider is restricted by its upstream site")
 	ErrBusy                = errors.New("upstream site observation already running")
+	errBalanceMultipliers  = fmt.Errorf("invalid balance multipliers: %w", ErrInvalid)
 )
 
 // Endpoint is a copyable protocol address, never a dynamic forwarding reference.
@@ -108,6 +111,20 @@ type Config struct {
 	Policy               Policy      `json:"policy"`                 // automatic eligibility rules
 	Probes               []Probe     `json:"probes"`                 // independent health observation sources
 	Alerts               AlertPolicy `json:"alerts"`                 // notification-only thresholds
+
+	BalanceMultipliers BalanceMultipliers `json:"balance_multipliers,omitzero"`
+}
+
+// BalanceMultipliers distinguishes an omitted map from an explicit empty object.
+type BalanceMultipliers map[string]string
+
+func (m *BalanceMultipliers) UnmarshalJSON(raw []byte) error {
+	var values map[string]string
+	if err := json.Unmarshal(raw, &values); err != nil || values == nil {
+		return errBalanceMultipliers
+	}
+	*m = values
+	return nil
 }
 
 // Secrets is encrypted as one document and excluded from all site responses.
@@ -125,6 +142,26 @@ type Balance struct {
 	Available string  `json:"available"`       // spendable wallet amount
 	Total     *string `json:"total,omitempty"` // optional unfrozen account total
 	Used      *string `json:"used,omitempty"`  // optional account cumulative consumption
+
+	Price *WalletPrice `json:"price,omitempty"`
+	Basis string       `json:"basis,omitempty"`
+}
+
+const (
+	walletPriceConfigured = "configured"
+	walletPriceDefault    = "default"
+	walletPriceUnset      = "unset"
+)
+
+type WalletPrice struct {
+	Multiplier string `json:"multiplier"`
+	Source     string `json:"source"`
+	Version    int64  `json:"version"`
+}
+
+type WalletPriceRevision struct {
+	Version   int64     `json:"version"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Observation is one accepted source result; errors never manufacture balance samples.
@@ -181,6 +218,39 @@ type Site struct {
 	ProviderCount   int                  `json:"provider_count"`             // active bound provider count
 	Ciphertext      string               `json:"-"`                          // encrypted monitoring credential document
 	WalletChanged   bool                 `json:"-"`                          // service-verified wallet identity change
+
+	LastBalanceObservation *Observation                   `json:"last_balance_observation,omitempty"`
+	BalancePriceRevisions  map[string]WalletPriceRevision `json:"balance_price_revisions,omitempty"`
+}
+
+func (c Config) balancePrice(unit string) WalletPrice {
+	if multiplier := c.BalanceMultipliers[unit]; multiplier != "" {
+		return WalletPrice{Multiplier: multiplier, Source: walletPriceConfigured}
+	}
+	if unit == "CNY" {
+		return WalletPrice{Multiplier: "1", Source: walletPriceDefault}
+	}
+	return WalletPrice{Source: walletPriceUnset}
+}
+
+// PriceFor returns the current effective price, including defaults on legacy sites.
+func (s Site) PriceFor(unit string) WalletPrice {
+	price := s.Config.balancePrice(unit)
+	price.Version = s.BalancePriceRevisions[unit].Version
+	return price
+}
+
+func (s *Site) updateBalancePriceRevisions(next Config, at time.Time) {
+	for _, unit := range []string{"USD", "CNY", "TOKENS"} {
+		previous := s.PriceFor(unit)
+		if previous.Multiplier == next.balancePrice(unit).Multiplier {
+			continue
+		}
+		if s.BalancePriceRevisions == nil {
+			s.BalancePriceRevisions = make(map[string]WalletPriceRevision)
+		}
+		s.BalancePriceRevisions[unit] = WalletPriceRevision{Version: previous.Version + 1, UpdatedAt: at}
+	}
 }
 
 // DefaultConfig supplies conservative scheduling and recovery settings for new sites.
@@ -212,6 +282,13 @@ func Amount(raw string) (decimal.Decimal, error) {
 // It normalizes a missing name from the host and enables wallet polling when
 // a balance policy depends on it. Address templates remain independent values.
 func (c *Config) Validate() error {
+	for unit, raw := range c.BalanceMultipliers {
+		value, err := Amount(raw)
+		if !validUnit(unit) || err != nil || !value.IsPositive() || strings.ContainsAny(raw, "eE") {
+			return errBalanceMultipliers
+		}
+		c.BalanceMultipliers[unit] = value.String()
+	}
 	if c.Endpoints == nil {
 		c.Endpoints = []Endpoint{}
 	}
