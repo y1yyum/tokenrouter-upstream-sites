@@ -158,7 +158,7 @@ func (p *Plugin) listHTTP(w http.ResponseWriter, r *http.Request) {
 		v.Site.ProviderCount = counts[v.Site.ID]
 		out = append(out, v.Site)
 	}
-	reply(w, map[string]any{"sites": out, "control_available": p.bridge != nil, "version": "1.2.0"}, nil)
+	reply(w, map[string]any{"sites": out, "control_available": p.bridge != nil, "version": p.env.Version}, nil)
 }
 
 // saveHTTP applies optimistic edits while retaining omitted write-only secrets.

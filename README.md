@@ -1,6 +1,6 @@
 # 上游站点插件
 
-上游站点管理插件 `local.upstream-sites`，源码版本 1.2.0。
+上游站点管理插件 `local.upstream-sites`，源码版本 1.2.1。
 
 第三方独立插件，使用官方插件接口提供管理页面，无需替换 TokenRouter 主程序。自动停用与自动恢复默认关闭。
 
@@ -36,7 +36,7 @@
 
 ## New API 账户余额
 
-查询顺序为 `/api/status`、`/api/usage/token/` 的账户字段、可选的 `/api/user/self`、最后 `/user/balance`。`total_granted`、`total_used`、`total_available`、单 Key 的 `quota` 和无限额度标志均不作为账户余额，也不校验 Key 限额是否一致。仅有账户访问令牌时可直接查询用户接口。
+查询顺序为 `/api/status`、`/api/usage/token/` 的账户字段、可选的 `/api/user/self`、最后 `/user/balance`。官方 New API 在该 Key 获得账户额度读取授权时，会在 `data.user_quota.total_available` 返回账户原始额度。插件按站点的显示单位折算。外层 `data.total_available`、`total_granted`、`total_used` 以及单 Key 的 `quota` 属于 Key 额度。仅有账户访问令牌时可直接查询用户接口。[官方 New API 返回字段](https://github.com/QuantumNous/new-api/blob/6627f0e3f37c002564b630a73e5afb0d28a92d3b/controller/token.go#L263-L289)
 
 - 内嵌账户余额优先使用 `user_balance_display`，其次 `user_balance`；前者为显示金额，后者为原始账户额度。优先字段存在但无效时停止，不改用其他余额。
 - 使用站点显示设置转换 USD、CNY、TOKENS；设置缺失时沿用官方默认 USD、每单位 500000、汇率 1。可选设置请求限时 3 秒，整轮请求限时 25 秒。金额用十进制计算，最多 10 位小数，保留合法的欠费负余额。
