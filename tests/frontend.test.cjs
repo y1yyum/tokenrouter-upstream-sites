@@ -120,6 +120,10 @@ test('倍率精确预览、非法输入拦截和清空完整映射', async () =>
   assert.equal(saved.body.secrets.key, '')
 
   await find(render(), 'button', '新增站点').props.onClick()
+  assert.equal(control(render(), 'USD（站内额度').props.value, '')
+  enter(control(render(), '上游类型', 'select'), 'kimi_balance')
+  assert.equal(control(render(), 'CNY（站内额度').props.value, '')
+  enter(control(render(), '上游类型', 'select'), 'new_api')
   enter(control(render(), '首次查询前可选单位', 'select'), 'TOKENS')
   enter(control(render(), 'TOKENS（站内额度'), '0.5')
   assert.match(visibleText(render()), /20 TOKENS ≈ 40 元/)

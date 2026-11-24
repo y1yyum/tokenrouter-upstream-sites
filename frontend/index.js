@@ -9,6 +9,7 @@
   const protocols = ['openai_chat_completions', 'openai_responses', 'anthropic_messages', 'gemini_generate_content', 'custom']
   const adapters = { sub2api: 'Sub2API', new_api: 'New API', deepseek_balance: 'DeepSeek', kimi_balance: 'Kimi', zivv: 'Zivv', derouter: 'DeRouter' }
   const units = ['USD', 'CNY', 'TOKENS']
+  const adapterWalletUnits = { sub2api: 'USD', derouter: 'USD', kimi_balance: 'CNY' }
   const periods = [['today', '今日'], ['7d', '近 7 日'], ['30d', '近 30 日'], ['retained', '保留期']]
   const balanceStatuses = { fresh: '有效样本', stale: '已过期', unknown: '未知', archived: '已归档' }
   const pricingStatuses = { priced: '已计价', partial: '部分计价', unknown: '成本未知' }
@@ -197,13 +198,14 @@
       function multiplierFields(site) {
         const configured = site.config.balance_multipliers
         const observed = new Set((site.latest?.balances || []).map(balance => balance.unit))
-        const shown = units.filter(unit => observed.has(unit) || Object.hasOwn(configured, unit) || firstUnit.value === unit)
+        const selectedUnit = firstUnit.value || (!observed.size && adapterWalletUnits[site.config.adapter]) || ''
+        const shown = units.filter(unit => observed.has(unit) || Object.hasOwn(configured, unit) || selectedUnit === unit)
         return h('fieldset', [
           h('legend', '余额倍率（选填）'),
           h('p', { class: 'us-muted' }, '填写实付 1 元可得的站内额度。CNY 留空按默认 1 换算，其他单位留空显示待设倍率。'),
           !observed.size ? h('label', { class: 'us-field us-filter' }, [
             '首次查询前可选单位',
-            select(firstUnit.value, [['', '请选择单位'], ...units.map(unit => [unit, unit])], value => { firstUnit.value = value }),
+            select(selectedUnit, [['', '请选择单位'], ...units.map(unit => [unit, unit])], value => { firstUnit.value = value }),
           ]) : null,
           h('div', { class: 'us-grid' }, shown.map(unit => {
             const value = configured[unit] ?? ''
