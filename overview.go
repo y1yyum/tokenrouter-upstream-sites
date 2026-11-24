@@ -119,9 +119,10 @@ type overviewSite struct {
 }
 
 type overviewBalanceAttempt struct {
-	At      time.Time `json:"at"`
-	Outcome string    `json:"outcome"`
-	Code    string    `json:"code"`
+	At         time.Time `json:"at"`
+	Outcome    string    `json:"outcome"`
+	Code       string    `json:"code"`
+	Diagnostic string    `json:"diagnostic,omitempty"`
 }
 
 type overviewBalance struct {
@@ -232,7 +233,7 @@ func overviewSiteBalance(now time.Time, site Site) overviewSite {
 		attempt = site.LastObservation
 	}
 	if attempt != nil {
-		out.LastBalanceObservation = &overviewBalanceAttempt{At: attempt.At.UTC(), Outcome: attempt.Outcome, Code: attempt.Code}
+		out.LastBalanceObservation = &overviewBalanceAttempt{At: attempt.At.UTC(), Outcome: attempt.Outcome, Code: attempt.Code, Diagnostic: attempt.Diagnostic}
 	}
 	latest := site.Latest
 	if latest == nil || latest.WalletEpoch != site.WalletEpoch {

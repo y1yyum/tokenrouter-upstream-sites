@@ -9,7 +9,7 @@ const asOf = '2026-11-24T20:00:00Z'
 const usd = { unit: 'USD', available: '100', multiplier: '2', source: 'configured', balance_cny: '50' }
 const cny = { unit: 'CNY', available: '0', multiplier: '1', source: 'default', balance_cny: '0' }
 const tokens = { unit: 'TOKENS', available: '0', multiplier: null, source: 'unset', balance_cny: null }
-const failedWallet = { source: 'balance', outcome: 'authentication', at: asOf }
+const failedWallet = { source: 'balance', outcome: 'authentication', diagnostic: 'GROUP_DISABLED', at: asOf }
 
 function siteFixture(overrides = {}) {
   return {
@@ -140,7 +140,7 @@ test('时区只筛期间、钱包失败状态保留、部分计价与零额可�
   }) })
   assert.deepEqual(calls.find(call => call.path === '/statistics/overview').query, { period: 'today' })
   const first = visibleText(render())
-  for (const label of ['50 CNY', '折合 0 CNY', '已过期', '已归档 3 站', '未知 2 站', '待设倍率', '部分计价', '凭据或访问被拒绝']) {
+  for (const label of ['50 CNY', '折合 0 CNY', '已过期', '已归档 3 站', '未知 2 站', '待设倍率', '部分计价', '凭据或访问被拒绝', '上游 Key 所属分组已停用']) {
     assert.ok(first.includes(label), label)
   }
   await find(render(), 'button', '编辑').props.onClick()

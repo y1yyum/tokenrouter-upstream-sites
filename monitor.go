@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -80,11 +81,16 @@ func endpoint(base, path string) string {
 	return strings.TrimSuffix(strings.TrimRight(base, "/"), "/v1") + path
 }
 
-// request reads at most two MiB and never returns upstream bodies as diagnostics.
 func request(ctx context.Context, c *http.Client, target, key, user string) ([]byte, int, error) {
+	body, status, _, err := requestWithHeaders(ctx, c, target, key, user)
+	return body, status, err
+}
+
+// requestWithHeaders reads at most two MiB. Response data stays in the monitor.
+func requestWithHeaders(ctx context.Context, c *http.Client, target, key, user string) ([]byte, int, http.Header, error) {
 	r, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	r.Header.Set("Accept", "application/json")
 	if key != "" {
@@ -95,14 +101,53 @@ func request(ctx context.Context, c *http.Client, target, key, user string) ([]b
 	}
 	response, err := c.Do(r)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
 	if len(body) > 2*1024*1024 {
-		return nil, response.StatusCode, errWallet
+		return nil, response.StatusCode, response.Header, errWallet
 	}
-	return body, response.StatusCode, err
+	return body, response.StatusCode, response.Header, err
+}
+
+func sub2APIAuthDiagnostic(status int, headers http.Header, body []byte) string {
+	if strings.EqualFold(headers.Get("Cf-Mitigated"), "challenge") {
+		return "UPSTREAM_CLOUDFLARE_CHALLENGE"
+	}
+	if json.Valid(body) {
+		code := gjson.GetBytes(body, "code").String()
+		switch status {
+		case http.StatusUnauthorized:
+			switch code {
+			case "API_KEY_REQUIRED", "INVALID_API_KEY", "API_KEY_DISABLED", "USER_NOT_FOUND", "USER_INACTIVE":
+				return code
+			}
+		case http.StatusForbidden:
+			switch code {
+			case "ACCESS_DENIED", "GROUP_DELETED", "GROUP_DISABLED", "GROUP_NOT_ALLOWED",
+				"API_KEY_EXPIRED", "INSUFFICIENT_BALANCE", "SUBSCRIPTION_NOT_FOUND":
+				return code
+			}
+		}
+		return "UPSTREAM_JSON_AUTH_REJECTION"
+	}
+	mediaType, _, _ := mime.ParseMediaType(headers.Get("Content-Type"))
+	if mediaType == "text/html" || strings.HasPrefix(http.DetectContentType(body), "text/html;") {
+		return "UPSTREAM_HTML_AUTH_REJECTION"
+	}
+	return ""
+}
+
+func walletErrorDiagnostic(err error) string {
+	var detail newAPIWalletDiagnostic
+	if errors.As(err, &detail) {
+		switch detail {
+		case newAPIKeyQuotaOnly, newAPINoAccountBalanceWithKey:
+			return detail.WalletDiagnostic()
+		}
+	}
+	return ""
 }
 
 // observe classifies a wallet or explicitly configured probe without provider writes.
@@ -143,16 +188,18 @@ func (p *Plugin) observe(parent context.Context, c Config, s Secrets, source str
 	}
 	var body []byte
 	var status int
+	var headers http.Header
 	var err error
 	newAPI := source == "balance" && c.Adapter == "new_api"
 	if newAPI {
 		o.Balances, status, err = queryNewAPI(ctx, client, c.BaseURL, s)
 	} else {
-		body, status, err = request(ctx, client, target, key, user)
+		body, status, headers, err = requestWithHeaders(ctx, client, target, key, user)
 	}
 	o.At = time.Now().UTC()
 	o.HTTPStatus = status
 	if errors.Is(err, errWallet) {
+		o.Diagnostic = walletErrorDiagnostic(err)
 		return o
 	}
 	if errors.Is(err, errAuth) {
@@ -176,9 +223,12 @@ func (p *Plugin) observe(parent context.Context, c Config, s Secrets, source str
 		}
 		return o
 	}
-	if status == 401 || status == 403 {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		o.Outcome = Authentication
 		o.Code = "UPSTREAM_AUTHENTICATION_FAILED"
+		if source == "balance" && c.Adapter == "sub2api" {
+			o.Diagnostic = sub2APIAuthDiagnostic(status, headers, body)
+		}
 		return o
 	}
 	if status == 429 {

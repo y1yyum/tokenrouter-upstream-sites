@@ -98,7 +98,7 @@ func TestOverviewSeparatesFreshnessTimezoneAndArchival(t *testing.T) {
 	stale, fresh := overviewFixtureSite(1, "UTC", &staleSample), overviewFixtureSite(2, "Asia/Shanghai", &freshSample)
 	stale.Config.BalanceMultipliers = BalanceMultipliers{"USD": "2"}
 	fresh.Config.BalanceMultipliers = BalanceMultipliers{"USD": "2"}
-	fresh.LastBalanceObservation = &Observation{Source: "balance", At: now.Add(-time.Minute), Outcome: Authentication, Code: "WALLET_AUTH"}
+	fresh.LastBalanceObservation = &Observation{Source: "balance", At: now.Add(-time.Minute), Outcome: Authentication, Code: "WALLET_AUTH", Diagnostic: "GROUP_DISABLED"}
 	fresh.LastObservation = &Observation{Source: "health", At: now, Outcome: Healthy}
 	archived := overviewFixtureSite(3, "UTC", &freshSample)
 	archived.Archived = true
@@ -126,6 +126,7 @@ func TestOverviewSeparatesFreshnessTimezoneAndArchival(t *testing.T) {
 	require.Equal(t, "fresh", all.Sites[1].Status)
 	require.Equal(t, &freshSample.At, all.Sites[1].SampledAt)
 	require.Equal(t, Authentication, all.Sites[1].LastBalanceObservation.Outcome)
+	require.Equal(t, "GROUP_DISABLED", all.Sites[1].LastBalanceObservation.Diagnostic)
 	require.Equal(t, int64(4), all.Sites[2].SiteID)
 	require.Equal(t, "unknown", all.Sites[2].Status)
 	require.Equal(t, Unreachable, all.Sites[2].LastBalanceObservation.Outcome)

@@ -174,6 +174,7 @@ type Observation struct {
 	Outcome         string     `json:"outcome"`               // structured evidence classification
 	Code            string     `json:"code"`                  // safe diagnostic identifier
 	HTTPStatus      int        `json:"http_status,omitempty"` // observed upstream status
+	Diagnostic      string     `json:"diagnostic,omitempty"`  // allowlisted detail for administrators
 	Balances        []Balance  `json:"balances,omitempty"`    // wallet-only normalized amounts
 	IntervalMinutes int        `json:"interval_minutes"`      // interval at observation time
 	WalletEpoch     int64      `json:"wallet_epoch"`          // immutable wallet identity segment

@@ -12,6 +12,25 @@
   const adapterWalletUnits = { sub2api: 'USD', derouter: 'USD', kimi_balance: 'CNY' }
   const periods = [['today', '今日'], ['7d', '近 7 日'], ['30d', '近 30 日'], ['retained', '保留期']]
   const balanceStatuses = { fresh: '有效样本', stale: '已过期', unknown: '未知', archived: '已归档' }
+  const walletDiagnostics = new Map(Object.entries({
+    API_KEY_REQUIRED: '上游要求余额查询 Key',
+    INVALID_API_KEY: '上游未识别余额查询 Key',
+    API_KEY_DISABLED: '上游已停用余额查询 Key',
+    API_KEY_EXPIRED: '上游余额查询 Key 已到期',
+    USER_NOT_FOUND: '上游未找到账户',
+    USER_INACTIVE: '上游账户未启用',
+    ACCESS_DENIED: '上游拒绝当前请求，请核对该 Key 的访问授权',
+    GROUP_DELETED: '上游 Key 所属分组已删除',
+    GROUP_DISABLED: '上游 Key 所属分组已停用',
+    GROUP_NOT_ALLOWED: '上游账户无权使用该分组',
+    INSUFFICIENT_BALANCE: '上游以账户余额不足为由拒绝查询',
+    SUBSCRIPTION_NOT_FOUND: '上游未找到该分组的有效订阅',
+    UPSTREAM_CLOUDFLARE_CHALLENGE: '上游返回 Cloudflare 验证页',
+    UPSTREAM_JSON_AUTH_REJECTION: '上游接口拒绝授权，未提供可识别的原因',
+    UPSTREAM_HTML_AUTH_REJECTION: '上游返回 HTML 拒绝页面',
+    NEW_API_KEY_QUOTA_ONLY: '该 Key 仅返回自身额度，查询账户余额需要上游账户额度授权或账户访问令牌',
+    NEW_API_NO_ACCOUNT_BALANCE_WITH_KEY: '当前 Key 未查到可用账户余额，此站尚未配置账户访问令牌',
+  }))
   const pricingStatuses = { priced: '已计价', partial: '部分计价', unknown: '成本未知' }
   const unpricedReasons = {
     missing_price_snapshot: '缺少历史倍率快照',
@@ -338,8 +357,10 @@
       function walletStatus(site, row) {
         const observation = row?.last_balance_observation || site.last_balance_observation ||
           (site.last_observation?.source === 'balance' ? site.last_observation : site.latest)
+        const reason = walletDiagnostics.get(observation?.diagnostic)
         return h('div', { class: 'us-stack' }, [
           h(TrBadge, { tone: observation?.outcome === 'healthy' ? 'success' : 'warning' }, () => statuses[observation?.outcome] || '尚未查询'),
+          reason ? h('small', reason) : null,
           observation?.at ? h('small', displayTime(observation.at)) : null,
         ])
       }
@@ -483,7 +504,7 @@
           table(['时间', '来源', '结果', '账户余额', '诊断'], history.value.map(observation => [
             displayTime(observation.at), observation.source, statuses[observation.outcome] || observation.outcome,
             (observation.balances || []).map(balance => amountText(balance.available, balance.unit)).join(' / ') || '未知',
-            `${observation.code}${observation.http_status ? ` (HTTP ${observation.http_status})` : ''}`,
+            [observation.code, observation.http_status ? `(HTTP ${observation.http_status})` : '', walletDiagnostics.get(observation.diagnostic)].filter(Boolean).join(' '),
           ])),
           h('div', { class: 'us-actions' }, [
             button('上一页', () => loadHistory(site, offset.value - 100), true, offset.value === 0),
